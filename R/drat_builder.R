@@ -411,7 +411,7 @@ init_drat <- function(path, commit) {
   }
 
   if (commit && git_nstaged(path) > 0L) {
-    msg <- paste(c("Adding bin paths:", msg), sep = "\n")
+    msg <- paste(c("Adding bin paths:", msg), collapse = "\n")
     call_git(c("commit", "--no-verify", "-m", shQuote(msg)), workdir=path)
   }
 
