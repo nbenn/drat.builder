@@ -256,7 +256,7 @@ update_drat <- function(packages, commit, drop_history) {
     git_init(path)
     call_git(c("checkout", "-b", "gh-pages"), workdir=path)
   }
-  init_drat(path)
+  init_drat(path, commit)
 
   if (commit && git_nstaged(path) > 0L) {
     stop("Must have no staged files to commit")
@@ -379,11 +379,12 @@ init_library <- function(path) {
   .libPaths(path)
 }
 
-init_drat <- function(path) {
+init_drat <- function(path, commit) {
   ## TODO: Hit metacran or something here to get the current R version
   ## so that this can be bumped.  3.5 should last for the next year or
   ## so though.
   dir.create(file.path(path, "src", "contrib"), FALSE, TRUE)
+  msg <- character(0)
   for (platform in c("windows", "macosx", "macosx/mavericks",
                      "macosx/el-capitan", "macosx/big-sur-arm64")) {
     for (version in c("3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "4.0", "4.1")) {
@@ -391,13 +392,27 @@ init_drat <- function(path) {
       pp <- file.path(p, "PACKAGES")
       ppz <- paste0(pp, ".gz")
       dir.create(p, FALSE, TRUE)
+      if (!file.exists(pp) || !file.exists(ppz)) {
+        msg <- c(msg, paste(paste0("  ", platform), version, sep = ", "))
+      }
       if (!file.exists(pp)) {
         writeLines(character(0), pp)
+        if (commit) {
+          git_add(pp, force=TRUE, repo=path)
+        }
       }
       if (!file.exists(ppz)) {
         writeLines_gz(character(0), ppz)
+        if (commit) {
+          git_add(ppz, force=TRUE, repo=path)
+        }
       }
     }
+  }
+
+  if (commit && git_nstaged(path) > 0L) {
+    msg <- paste(c("Adding bin paths:", msg), sep = "\n")
+    call_git(c("commit", "--no-verify", "-m", shQuote(msg)), workdir=path)
   }
 
   ## gitignore <- file.path(path, "src", ".gitignore")
