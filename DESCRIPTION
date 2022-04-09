@@ -13,6 +13,11 @@ Imports:
     docopt,
     drat,
     jsonlite,
-    whisker
-Suggests: testthat
+    whisker,
+    httr,
+    xml2
+Suggests:
+    testthat
 SystemDependencies: git
+RoxygenNote: 7.1.2
+Encoding: UTF-8

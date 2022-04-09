@@ -15,7 +15,8 @@ main <- function(args=commandArgs(TRUE)) {
   --no-commit            skip commit
   --no-build-vignettes   skip vignettes (default behaviour, can override per package)
   --no-manual            skip manual (default behaviour, can override per package)
-  --drop-history         drop all git history' -> doc
+  --drop-history         drop all git history
+  --check_cran           retrieve contrib URL paths from CRAN' -> doc
   oo <- options(warnPartialMatchArgs=FALSE)
   if (isTRUE(oo$warnPartialMatchArgs)) {
     on.exit(options(oo))
@@ -34,7 +35,8 @@ main <- function(args=commandArgs(TRUE)) {
         no_commit          = opts$no_commit,
         no_build_vignettes = opts$no_build_vignettes,
         no_manual          = opts$no_manual,
-        drop_history       = opts$drop_history)
+        drop_history       = opts$drop_history,
+        check_cran         = opts$check_cran)
 }
 
 ##' Build/Update a drat repo
@@ -53,12 +55,13 @@ main <- function(args=commandArgs(TRUE)) {
 ##' @param drop_history Drop all git history (note that this is a
 ##'   destructive operation, though drat.builder will attempt to leave
 ##'   things somewhat recoverable).
+##' @param check_cran Retrieve contrib URL paths from CRAN.
 ##' @export
 build <- function(package_list="packages.txt",
                   install=FALSE, install_local=FALSE,
                   no_fetch=FALSE, no_commit=FALSE,
                   no_build_vignettes=TRUE, no_manual=TRUE,
-                  drop_history=FALSE) {
+                  drop_history=FALSE, check_cran=FALSE) {
   defaults <- list(vignettes = !(no_build_vignettes), manual = !(no_manual))
   pkgs <- read_packages(package_list)
   if (!no_fetch) {
@@ -70,7 +73,7 @@ build <- function(package_list="packages.txt",
     install_deps(pkgs, lib)
   }
   build_packages(pkgs, defaults)
-  update_drat(pkgs, !no_commit, drop_history)
+  update_drat(pkgs, !no_commit, drop_history, check_cran)
 }
 
 read_packages <- function(package_list="packages.txt") {
@@ -249,14 +252,14 @@ clean_packages <- function(packages) {
 ## TODO: Version of this for starting from a fresh commit
 ##   -- http://stackoverflow.com/a/15572071/1798863
 ##' @importFrom drat insertPackage
-update_drat <- function(packages, commit, drop_history) {
+update_drat <- function(packages, commit, drop_history, check_cran) {
   path <- attr(packages, "path")
   if (!file.exists(".git")) {
     ## NOTE: This duplicates some behaviour in drat::initRepo()
     git_init(path)
     call_git(c("checkout", "-b", "gh-pages"), workdir=path)
   }
-  init_drat(path, commit)
+  init_drat(path, commit, check_cran)
 
   if (commit && git_nstaged(path) > 0L) {
     stop("Must have no staged files to commit")
@@ -379,46 +382,107 @@ init_library <- function(path) {
   .libPaths(path)
 }
 
-init_drat <- function(path, commit) {
-  ## TODO: Hit metacran or something here to get the current R version
-  ## so that this can be bumped.  3.5 should last for the next year or
-  ## so though.
-  dir.create(file.path(path, "src", "contrib"), FALSE, TRUE)
-  msg <- character(0)
-  for (platform in c("windows", "macosx", "macosx/mavericks",
-                     "macosx/el-capitan", "macosx/big-sur-arm64")) {
-    for (version in c("3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "4.0", "4.1")) {
-      p <- file.path(path, "bin", platform, "contrib", version)
-      pp <- file.path(p, "PACKAGES")
-      ppz <- paste0(pp, ".gz")
-      dir.create(p, FALSE, TRUE)
-      if (!file.exists(pp) || !file.exists(ppz)) {
-        msg <- c(msg, paste(paste0("  ", platform), version, sep = ", "))
-      }
-      if (!file.exists(pp)) {
-        writeLines(character(0), pp)
-        if (commit) {
-          git_add(pp, force=TRUE, repo=path)
-        }
-      }
-      if (!file.exists(ppz)) {
-        writeLines_gz(character(0), ppz)
-        if (commit) {
-          git_add(ppz, force=TRUE, repo=path)
-        }
-      }
+get_links_or_null <- function(url) {
+
+  res <- httr::GET(url)
+
+  if (httr::http_error(res)) {
+    return(NULL)
+  }
+
+  xml <- httr::content(res, encoding = "UTF-8")
+
+  vcapply(xml2::xml_find_all(xml, "//a"), xml2::xml_attr, "href")
+}
+
+get_flavors <- function(os, base_url = "https://cran.r-project.org",
+                        cran = FALSE) {
+
+  if (cran) {
+    res <- get_links_or_null(paste(base_url, "bin", os, sep = "/"))
+  } else {
+    res <- NULL
+  }
+
+  if (is.null(res)) {
+    res <- c("macosx/mavericks", "macosx/el-capitan", "macosx/big-sur-arm64")
+  } else {
+    res <- res[grepl("/$", res)]
+    res <- res[!grepl("^http|^/|tools|base|old|contrib", res)]
+  }
+
+  paste(os, sub("/$", "", res), sep = "/")
+}
+
+get_versions <- function(flavor, base_url = "https://cran.r-project.org",
+                         cran = FALSE) {
+
+  if (cran) {
+    res <- get_links_or_null(
+      paste(base_url, "bin", flavor, "contrib", sep = "/")
+    )
+  } else {
+    res <- NULL
+  }
+
+  if (is.null(res)) {
+    res <- c("3.1", "3.2", "3.3", "3.4", "3.5", "3.6", "4.0", "4.1")
+  } else {
+    res <- res[grepl("/$", res)]
+    res <- res[!grepl("^/|^r-", res)]
+  }
+
+  file.path("bin", flavor, "contrib", res)
+}
+
+add_path <- function(path, commit, repo) {
+
+  pp <- file.path(path, "PACKAGES")
+  ppz <- paste0(pp, ".gz")
+
+  dir.create(path, FALSE, TRUE)
+
+  if (file.exists(pp) && file.exists(ppz)) {
+    return(invisible(FALSE))
+  }
+
+  if (!file.exists(pp)) {
+    writeLines(character(0), pp)
+    if (commit) {
+      git_add(pp, force = TRUE, repo = repo)
     }
   }
 
+  if (!file.exists(ppz)) {
+    writeLines_gz(character(0), ppz)
+    if (commit) {
+      git_add(ppz, force = TRUE, repo = repo)
+    }
+  }
+
+  invisible(TRUE)
+}
+
+init_drat <- function(path, commit, check_cran) {
+
+  dir.create(file.path(path, "src", "contrib"), FALSE, TRUE)
+
+  platform <- c("windows", "macosx", get_flavors("macosx", cran = check_cran))
+  ctb_urls <- unlist(lapply(platform, get_versions, cran = check_cran),
+                     recursive = FALSE, use.names = FALSE)
+
   if (commit && git_nstaged(path) > 0L) {
-    msg <- paste(c("adding bin paths", msg), collapse = "\n")
+    stop("Must have no staged files to commit")
+  }
+
+  status <- vlapply(ctb_urls, add_path, commit, path)
+
+  if (commit && any(status)) {
+    msg <- paste(c("adding bin paths", ctb_urls[status]), collapse = "\n")
     call_git(c("commit", "--no-verify", "-m", shQuote(msg)), workdir=path)
   }
 
-  ## gitignore <- file.path(path, "src", ".gitignore")
-  ## if (!file.exists(gitignore)) {
-  ##   writeLines("!*.gz", gitignore)
-  ## }
+  invisible(NULL)
 }
 
 ## From: http://stackoverflow.com/a/30225680
@@ -471,10 +535,6 @@ do_build <- function(p, defaults) {
 }
 
 ## Utilities:
-vcapply <- function(X, FUN, ...) {
-  vapply(X, FUN, character(1), ...)
-}
-
 get_package_name <- function(path) {
   read.dcf(paste0(path, "/DESCRIPTION"))[, "Package"][[1]]
 }
@@ -548,8 +608,7 @@ parse_packages <- function(x) {
       warning("Extra options ignored: ", paste(extra, collapse=", "),
               immediate.=TRUE)
     }
-    ok <- vapply(res, function(x) is.logical(x) && length(x) == 1,
-                 logical(1))
+    ok <- vlapply(res, function(x) is.logical(x) && length(x) == 1)
     if (!all(ok)) {
       stop(sprintf("All options must be logical scalars (error on %s)",
                    paste(names(ok[!ok]), collapse=", ")))
