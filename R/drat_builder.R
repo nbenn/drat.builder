@@ -478,8 +478,22 @@ init_drat <- function(path, commit, check_cran) {
   status <- vlapply(ctb_urls, add_path, commit, path)
 
   if (commit && any(status)) {
-    msg <- paste(c("adding bin paths", ctb_urls[status]), collapse = "\n")
+    msg <- paste(c("adding bin paths", ctb_urls[status]), collapse = "  \n")
     call_git(c("commit", "--no-verify", "-m", shQuote(msg)), workdir=path)
+  }
+
+  existing <- list.dirs(file.path(path, "bin"), recursive = TRUE)
+  existing <- sub("^\\./", "", existing)[grepl("contrib/", existing)]
+
+  to_rm <- setdiff(existing, sub("/$", "", ctb_urls))
+
+  if (length(to_rm)) {
+    unlink(to_rm, recursive = TRUE)
+    if (commit) {
+      git_add(to_rm, force = TRUE, repo = path)
+      msg <- paste(c("removing bin paths", to_rm), collapse = "  \n")
+      call_git(c("commit", "--no-verify", "-m", shQuote(msg)), workdir=path)
+    }
   }
 
   invisible(NULL)
